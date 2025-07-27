@@ -261,7 +261,7 @@ class TunnelSimulator:
             params = dict(params_tuple)
             dist_name = dist_name.lower()
             scale = params.get('scale', 0) if dist_name != 'cte' else 0
-            loc = params.get('loc', params.get('tiempo_base', 1))
+            loc = params.get('loc', params.get('value', params.get('tiempo_base', 1)))
             current_max_x = max(10, loc + 5 * scale)
 
             if dist_name in ['constant', 'cte', 'constante']:
@@ -389,11 +389,15 @@ class TunnelSimulator:
                 cycle_delay = 0.0
                 for delay_idx, delay in enumerate(all_delays):
                     delay_id = f"delay_{delay_idx}"
+                    # Check if current time has passed the delay start and it hasn't been applied in this 24h cycle
+                    # The modulo 24 ensures we check for delays within each day
                     if (total_sim_time % 24) >= delay['start_hour'] and delay_id not in applied_delays_this_run:
                         cycle_delay += delay['duration']
                         applied_delays_this_run.add(delay_id)
+                # Reset applied_delays_this_run for the next 24-hour cycle
+                if (total_sim_time + cycle_delay) // 24 > total_sim_time // 24: # If new day starts
+                    applied_delays_this_run = set()
 
-        
                 restriction_delay = self.check_restrictions(current_x, current_y, restriction_radius) * restriction_delay_time
                 cycle_time = cycle_delay + restriction_delay
 
@@ -411,6 +415,14 @@ class TunnelSimulator:
                     temp_params = params.copy()
                     for key in ['tiempo_base', 'value', 'loc', 'scale']:
                         if key in temp_params: temp_params[key] *= mod_factor
+                    # Special handling for shape parameters, they should not be scaled by mod_factor
+                    # 's' for lognorm, 'c' for weibull/fisk, 'a' for gamma
+                    if dist_name.lower() == 'lognorm' and 's' in params:
+                        temp_params['s'] = params['s']
+                    elif dist_name.lower() in ['weibull', 'fisk'] and 'c' in params:
+                        temp_params['c'] = params['c']
+                    elif dist_name.lower() == 'gamma' and 'a' in params:
+                        temp_params['a'] = params['a']
 
                     cycle_time += self.sample_from_distribution(dist_name, temp_params, 1)[0].item()
 
@@ -451,6 +463,14 @@ class TunnelSimulator:
             mod_factor = 1.0 + ((time_modification_percent + res_mod) / 100.0)
             for key in ['tiempo_base', 'value', 'loc', 'scale']:
                 if key in params: params[key] *= mod_factor
+            # Special handling for shape parameters, they should not be scaled by mod_factor
+            if dist_name.lower() == 'lognorm' and 's' in params:
+                params['s'] = activity.get('params', {}).get('s', 0.5) if uid not in modified_times else modified_times[uid]['params'].get('s', 0.5)
+            elif dist_name.lower() in ['weibull', 'fisk'] and 'c' in params:
+                params['c'] = activity.get('params', {}).get('c', 1.0) if uid not in modified_times else modified_times[uid]['params'].get('c', 1.0)
+            elif dist_name.lower() == 'gamma' and 'a' in params:
+                params['a'] = activity.get('params', {}).get('a', 1.99) if uid not in modified_times else modified_times[uid]['params'].get('a', 1.99)
+
 
             samples = self.sample_from_distribution(dist_name, params, size=num_samples)
 
@@ -488,6 +508,11 @@ class TunnelSimulator:
                         current_cycle_time += delay_duration
                         delay_results[delay_id]['finishes'].append(current_cycle_time)
                         applied_delays_this_run.add(delay_id)
+                
+                # Reset applied_delays_this_run for the next 24-hour cycle
+                if current_cycle_time // 24 > (current_cycle_time - (delay_duration if 'delay_duration' in locals() else 0)) // 24:
+                    applied_delays_this_run = set()
+
 
                 if i < len(nivel_activities):
                     activity = nivel_activities.iloc[i]
@@ -505,6 +530,13 @@ class TunnelSimulator:
                     temp_params = params.copy()
                     for key in ['tiempo_base', 'value', 'loc', 'scale']:
                         if key in temp_params: temp_params[key] *= mod_factor
+                    # Special handling for shape parameters, they should not be scaled by mod_factor
+                    if dist_name.lower() == 'lognorm' and 's' in params:
+                        temp_params['s'] = params['s']
+                    elif dist_name.lower() in ['weibull', 'fisk'] and 'c' in params:
+                        temp_params['c'] = params['c']
+                    elif dist_name.lower() == 'gamma' and 'a' in params:
+                        temp_params['a'] = params['a']
 
                     duration = self.sample_from_distribution(dist_name, temp_params, size=1)[0].item()
 
@@ -558,7 +590,7 @@ def main():
         st.subheader("Parámetros de Simulación")
         advance_length = st.number_input("Largo de avance por ciclo (m)", 0.1, 10.0, 2.5, 0.1)
         num_simulations = st.number_input("Número de simulaciones de avance", 100, 10000, 1000, 100)
-        time_limit = st.number_input("Tiempo límite total (horas)", 1.0, 8760.0, 160.0, 1.0) # Valor por defecto ajustado a tu ejemplo
+        time_limit = st.number_input("Tiempo límite total (horas)", 1.0, 8760.0, 160.0, 1.0) 
         restriction_radius = st.number_input("Radio de restricciones (m)", 10.0, 200.0, 50.0, 10.0)
         restriction_delay_time = st.number_input("Demora por restricción (horas)", 0.0, 24.0, 4.0, 0.5)
         time_modification_percent = st.number_input("Modificación de tiempo global (%)", -50, 100, 0, 5, help="Afecta a TODAS las actividades.")
@@ -567,7 +599,7 @@ def main():
         st.subheader("🔧 Sensibilización de Recursos")
         if st.session_state.simulator.activities_df is not None:
             levels = st.session_state.simulator.activities_df['Nivel'].dropna().unique()
-            level_to_config = st.selectbox("Nivel para ajustar recursos", options=levels)
+            level_to_config = st.selectbox("Nivel para ajustar recursos", options=levels, key="level_adj_res")
             if level_to_config:
                 if level_to_config not in st.session_state.resource_adjustments:
                     st.session_state.resource_adjustments[level_to_config] = {}
@@ -635,7 +667,7 @@ def main():
         st.subheader("🎯 Visualización de Frentes")
         if st.session_state.simulator.fronts_df is not None:
             niveles_viz = st.session_state.simulator.fronts_df['Nivel'].unique()
-            nivel_selected_viz = st.selectbox("Nivel para visualización", niveles_viz)
+            nivel_selected_viz = st.selectbox("Nivel para visualización", niveles_viz, key="nivel_viz")
             if nivel_selected_viz:
                 fig_viz = generate_fronts_visualization(st.session_state.simulator.fronts_df, st.session_state.simulator.restrictions, restriction_radius, nivel_selected_viz)
                 st.plotly_chart(fig_viz, use_container_width=True)
@@ -643,16 +675,112 @@ def main():
     if st.session_state.simulator.activities_df is not None:
         st.markdown("---")
         st.subheader("📊 Modificar Distribuciones de Actividades")
-        with st.expander("Configurar Tiempos de Actividades", expanded=False):
-            activities = st.session_state.simulator.activities_df[['Nivel', 'Actividad']].drop_duplicates().apply(lambda x: f"{x[0]} - {x[1]}", axis=1)
-            activity_to_modify = st.selectbox("Actividad para modificar", options=activities)
 
-            if activity_to_modify:
-                nivel_mod, act_mod = activity_to_modify.split(' - ', 1)
-                act_rows = st.session_state.simulator.activities_df[(st.session_state.simulator.activities_df['Nivel'] == nivel_mod) & (st.session_state.simulator.activities_df['Actividad'] == act_mod)]
+        # --- Nueva sección para modificación masiva por nivel ---
+        with st.expander("Modificación Masiva por Nivel", expanded=True):
+            niveles_mod_masiva = st.session_state.simulator.activities_df['Nivel'].dropna().unique()
+            nivel_masivo_selected = st.selectbox("Seleccionar Nivel para modificación masiva", niveles_mod_masiva, key="nivel_masivo_sel")
+
+            if nivel_masivo_selected:
+                activities_in_level = st.session_state.simulator.activities_df[st.session_state.simulator.activities_df['Nivel'] == nivel_masivo_selected]
+                activities_to_modify_uids = st.multiselect(
+                    "Seleccionar Actividades a Modificar (o dejar vacío para todas)",
+                    options=activities_in_level.apply(lambda x: f"{x['Actividad']} ({x['Recurso']})", axis=1).unique(),
+                    key="activities_masive_sel"
+                )
+                
+                # Filter to get actual UIDs
+                if activities_to_modify_uids:
+                    filtered_uids = []
+                    for act_str in activities_to_modify_uids:
+                        # Extract Activity and Resource from string "Activity (Resource)"
+                        act_name = act_str.split(' (')[0]
+                        res_name = act_str.split(' (')[1][:-1]
+                        # Find the corresponding unique_id
+                        matching_rows = activities_in_level[(activities_in_level['Actividad'] == act_name) & (activities_in_level['Recurso'] == res_name)]
+                        if not matching_rows.empty:
+                            filtered_uids.extend(matching_rows['unique_id'].tolist())
+                else:
+                    filtered_uids = activities_in_level['unique_id'].tolist()
+
+
+                st.markdown("#### Configurar Nueva Distribución (Aplicará a las seleccionadas)")
+                dist_options_masiva = ['cte', 'norm', 'lognorm', 'weibull', 'gamma', 'fisk', 'rayleigh']
+                new_dist_masiva = st.selectbox("Tipo de Distribución", dist_options_masiva, key="new_dist_masiva")
+
+                new_params_masiva = {}
+                tiempo_base_masiva = st.number_input("Tiempo Medio/Valor Constante (horas)", 0.01, value=1.0, step=0.1, key="tb_masiva", help="Valor central o constante para la nueva distribución.")
+                new_params_masiva['tiempo_base'] = tiempo_base_masiva
+                new_params_masiva['value'] = tiempo_base_masiva # For 'cte' distribution
+
+                if new_dist_masiva != 'cte':
+                    variability_masiva = st.slider("Variabilidad Relativa (scale)", 0.0, 2.0, 0.25, 0.05, key="s_masiva", help="Controla la desviación estándar en relación al tiempo medio.")
+                    scale_masiva = tiempo_base_masiva * variability_masiva
+                    new_params_masiva['loc'] = tiempo_base_masiva
+                    new_params_masiva['scale'] = scale_masiva
+
+                    if new_dist_masiva in ['lognorm', 'weibull', 'gamma', 'fisk']:
+                        shape_key_masiva = {'lognorm': 's', 'weibull': 'c', 'gamma': 'a', 'fisk': 'c'}[new_dist_masiva]
+                        shape_label_masiva = {'lognorm': 'Sigma', 'weibull': 'k', 'gamma': 'alpha', 'fisk': 'c'}[new_dist_masiva]
+                        shape_defaults_masiva = {'s': 0.5, 'c': 2.0, 'a': 2.0}
+                        new_params_masiva[shape_key_masiva] = st.number_input(f"Parámetro de Forma ({shape_label_masiva})", 0.1, 20.0, shape_defaults_masiva.get(shape_key_masiva, 1.0), 0.1, key=f"p1_masiva")
+
+                # Visualización de la distribución propuesta
+                st.markdown("#### Vista Previa de la Distribución Propuesta")
+                # Create a dummy activity for visualization purposes
+                original_params_for_viz = {'tiempo_base': tiempo_base_masiva} # Just a placeholder
+                if new_dist_masiva == 'cte':
+                     original_dist_name_for_viz = 'cte'
+                     original_params_for_viz = {'value': tiempo_base_masiva}
+                else:
+                    original_dist_name_for_viz = 'norm' # Using norm as a base for comparison if no specific original is loaded
+                    original_params_for_viz = {'loc': tiempo_base_masiva, 'scale': tiempo_base_masiva * 0.25} # Arbitrary initial variability for comparison
+
+                fig_mass_comp = st.session_state.simulator.plot_comparison_distribution(
+                    original_dist_name=original_dist_name_for_viz, original_params_tuple=tuple(sorted(original_params_for_viz.items())),
+                    modified_dist_name=new_dist_masiva, modified_params_tuple=tuple(sorted(new_params_masiva.items())),
+                    title=f"Comparación de la Nueva Distribución ({new_dist_masiva})"
+                )
+                if fig_mass_comp:
+                    st.plotly_chart(fig_mass_comp, use_container_width=True)
+
+                col_mass_save, col_mass_reset = st.columns(2)
+                with col_mass_save:
+                    if st.button("💾 Aplicar Cambios Masivos", key="save_mass_mod", use_container_width=True):
+                        if filtered_uids:
+                            for uid in filtered_uids:
+                                st.session_state.modified_times[uid] = {'params': new_params_masiva.copy(), 'distribucion': new_dist_masiva}
+                            st.success(f"Aplicados cambios a {len(filtered_uids)} actividades del nivel {nivel_masivo_selected}.")
+                            st.rerun()
+                        else:
+                            st.warning("No hay actividades seleccionadas para aplicar cambios.")
+                with col_mass_reset:
+                    if st.button("🔄 Restablecer todas las actividades de este nivel a su original", key="reset_mass_mod", use_container_width=True):
+                        count_reset = 0
+                        for uid in activities_in_level['unique_id'].tolist():
+                            if uid in st.session_state.modified_times:
+                                del st.session_state.modified_times[uid]
+                                count_reset += 1
+                        st.info(f"Restablecidas {count_reset} actividades del nivel {nivel_masivo_selected} a su configuración original.")
+                        st.rerun()
+
+        st.markdown("---")
+        # --- Sección para modificación individual (existente) ---
+        with st.expander("Configurar Tiempos de Actividades Individualmente", expanded=False):
+            activities = st.session_state.simulator.activities_df[['Nivel', 'Actividad', 'Recurso', 'unique_id']].drop_duplicates().apply(lambda x: f"{x[0]} - {x[1]} ({x[2]}) - {x[3]}", axis=1)
+            activity_to_modify_str = st.selectbox("Actividad para modificar", options=activities, key="single_act_mod_sel")
+
+            if activity_to_modify_str:
+                parts = activity_to_modify_str.split(' - ')
+                nivel_mod = parts[0]
+                act_res_part = parts[1]
+                uid = parts[2]
+                
+                # Find the original row for the selected unique_id
+                act_rows = st.session_state.simulator.activities_df[st.session_state.simulator.activities_df['unique_id'] == uid]
+                
                 if not act_rows.empty:
                     current_act = act_rows.iloc[0]
-                    uid = current_act['unique_id']
                     params_before = current_act.get('params', {}) or {'tiempo_base': current_act['tiempo_base']}
 
                     st.markdown("#### Comparación de Distribuciones")
@@ -663,11 +791,11 @@ def main():
                         fig_comp = st.session_state.simulator.plot_comparison_distribution(
                             original_dist_name=current_act['Distribucion'], original_params_tuple=original_params_tuple,
                             modified_dist_name=mod_data['distribucion'], modified_params_tuple=tuple(sorted(mod_data['params'].items())),
-                            title=f"Comparación para: {activity_to_modify}")
+                            title=f"Comparación para: {act_res_part}")
                     else:
                         fig_comp = st.session_state.simulator.plot_comparison_distribution(
                             original_dist_name=current_act['Distribucion'], original_params_tuple=original_params_tuple,
-                            title=f"Distribución Original para: {activity_to_modify}")
+                            title=f"Distribución Original para: {act_res_part}")
                     if fig_comp:
                         st.plotly_chart(fig_comp, use_container_width=True)
 
@@ -689,7 +817,12 @@ def main():
                         shape_key = {'lognorm': 's', 'weibull': 'c', 'gamma': 'a', 'fisk': 'c'}[new_dist]
                         shape_label = {'lognorm': 'Sigma', 'weibull': 'k', 'gamma': 'alpha', 'fisk': 'c'}[new_dist]
                         shape_defaults = {'s': 0.5, 'c': 2.0, 'a': 2.0}
-                        new_params[shape_key] = st.number_input(f"Parámetro de Forma ({shape_label})", 0.1, 20.0, shape_defaults.get(shape_key, 1.0), 0.1, key=f"p1_{uid}")
+                        # If already modified and has the shape param, use its value, else use default
+                        default_shape_val = shape_defaults.get(shape_key, 1.0)
+                        if uid in st.session_state.modified_times and shape_key in st.session_state.modified_times[uid]['params']:
+                            default_shape_val = st.session_state.modified_times[uid]['params'][shape_key]
+                        new_params[shape_key] = st.number_input(f"Parámetro de Forma ({shape_label})", 0.1, 20.0, default_shape_val, 0.1, key=f"p1_{uid}")
+
 
                     col_save, col_reset = st.columns(2)
                     with col_save:
@@ -707,10 +840,10 @@ def main():
     st.subheader("🚀 Selección de Frentes y Ejecución")
     if st.session_state.simulator.fronts_df is not None:
         niveles_sim = st.session_state.simulator.fronts_df['Nivel'].unique()
-        nivel_sel = st.selectbox("Nivel para Simular", niveles_sim)
+        nivel_sel = st.selectbox("Nivel para Simular", niveles_sim, key="nivel_sim")
         if nivel_sel:
             frentes = st.session_state.simulator.fronts_df[st.session_state.simulator.fronts_df['Nivel'] == nivel_sel]['Frentes'].unique()
-            frentes_sel = st.multiselect("Frentes a Simular", frentes, default=frentes)
+            frentes_sel = st.multiselect("Frentes a Simular", frentes, default=frentes, key="frentes_sel")
 
             if frentes_sel and st.session_state.simulator.restrictions:
                 fronts_to_check = st.session_state.simulator.fronts_df[st.session_state.simulator.fronts_df['Frentes'].isin(frentes_sel)]
@@ -735,7 +868,7 @@ def main():
                             st.session_state.all_results_df = pd.concat(all_results, ignore_index=True)
 
                     with st.spinner("Generando análisis detallado y Carta Gantt..."):
-                        selected_level_for_analysis = fronts_to_run['Nivel'].unique()[0]
+                        selected_level_for_analysis = nivel_sel # Use the selected level for simulation
                         num_samples_analysis = 1000
 
                         st.session_state.activity_dist_df = st.session_state.simulator.simulate_activity_distributions(
