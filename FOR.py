@@ -81,31 +81,61 @@ def plot_probabilistic_gantt(gantt_df, delay_df=None):
     fig = go.Figure()
 
     activity_df = combined_df[combined_df['type'] == 'activity']
+    # Range P10-P90
     fig.add_trace(go.Bar(
         y=activity_df['Actividad'],
-        x=activity_df['Duration_p90'], base=activity_df['Start_p10'],
+        x=activity_df['Finish_p90'] - activity_df['Start_p10'], 
+        base=activity_df['Start_p10'],
         orientation='h', name='Rango Actividad (P10-P90)',
         marker=dict(color='rgba(255, 165, 0, 0.5)', line_width=0),
         hoverinfo='none'
     ))
+
+    # Apply conditional text display for the P50 duration
+    activity_p50_texts = []
+    activity_p50_textpositions = []
+    for _, row in activity_df.iterrows():
+        # A threshold for showing text inside or outside, or not at all
+        # This value might need tuning based on your average bar width and font size
+        if row['Duration_p50'] > 1.5:  # If duration is reasonably long
+            activity_p50_texts.append(f'{row["Duration_p50"]:.2f}h')
+            activity_p50_textpositions.append('inside')
+        else:
+            activity_p50_texts.append(f'{row["Duration_p50"]:.2f}h')
+            activity_p50_textpositions.append('outside') 
+
+    # P50 Duration
     fig.add_trace(go.Bar(
         y=activity_df['Actividad'],
-        x=activity_df['Duration_p50'], base=activity_df['Start_p50'],
+        x=activity_df['Duration_p50'], 
+        base=activity_df['Start_p50'], # Use Start_p50 as base
         orientation='h', name='Duración Probable (P50)',
         marker=dict(color='rgba(26, 118, 255, 0.8)'),
-        text=activity_df['Duration_p50'].apply(lambda x: f'{x:.2f}h'),
-        textposition='inside', insidetextanchor='middle'
+        text=activity_p50_texts,
+        textposition=activity_p50_textpositions,
+        insidetextanchor='middle'
     ))
 
     if delay_df is not None and not delay_df.empty:
         delay_plot_df = combined_df[combined_df['type'] == 'delay']
+        delay_texts = []
+        delay_textpositions = []
+        for _, row in delay_plot_df.iterrows():
+            if row['Duration_p50'] > 1.5:
+                delay_texts.append(f'{row["Duration_p50"]:.2f}h')
+                delay_textpositions.append('inside')
+            else:
+                delay_texts.append(f'{row["Duration_p50"]:.2f}h')
+                delay_textpositions.append('outside')
+
         fig.add_trace(go.Bar(
             y=delay_plot_df['Actividad'],
             x=delay_plot_df['Duration_p50'], base=delay_plot_df['Start_p50'],
             orientation='h', name='Demora por Cambio (P50)',
             marker=dict(color='rgba(255, 0, 0, 0.8)'),
-            text=delay_plot_df['Duration_p50'].apply(lambda x: f'{x:.2f}h'),
-            textposition='inside', insidetextanchor='middle'
+            text=delay_texts,
+            textposition=delay_textpositions,
+            insidetextanchor='middle'
         ))
 
     total_p90 = combined_df['Finish_p90'].max()
@@ -113,7 +143,8 @@ def plot_probabilistic_gantt(gantt_df, delay_df=None):
         title='Carta Gantt Probabilística de un Ciclo (con Demoras por Cambios)',
         xaxis_title=f'Tiempo Acumulado (horas) - Fin Pesimista (P90): {total_p90:.2f}h',
         yaxis_title='Actividades y Demoras',
-        barmode='stack', template='plotly_white',
+        barmode='overlay', # Changed from 'stack' to 'overlay' to allow P50 within P10-P90
+        template='plotly_white',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         height=len(y_axis_labels) * 35 + 200,
         yaxis=dict(categoryorder='array', categoryarray=y_axis_labels.tolist()), # Usar el orden combinado
@@ -249,6 +280,56 @@ class TunnelSimulator:
         except Exception as e:
             st.warning(f"Error en distribución {dist_name}: {e}. Usando valor constante.")
             return torch.full((int(size),), params.get('tiempo_base', 1.0), device=device)
+    
+    def calculate_expected_value(self, dist_name, params):
+        """Calcula el valor esperado (media) para las distribuciones soportadas."""
+        dist_name = dist_name.lower()
+        if dist_name in ['constant', 'cte', 'constante']:
+            return params.get('value', 1.0)
+        
+        loc = params.get('loc', 0)
+        scale = params.get('scale', 1)
+
+        if dist_name == 'norm':
+            return loc
+        elif dist_name == 'lognorm':
+            s = params.get('s', 0.5)
+            # Mean of log-normal distribution is exp(mu + sigma^2/2)
+            # In scipy, loc is usually the median, scale is exp(mu), s is sigma
+            # So, mu = log(scale), sigma = s
+            # Mean = scale * exp(s^2 / 2)
+            return scale * np.exp(s**2 / 2) # This is a common formula for lognorm mean
+        elif dist_name == 'weibull':
+            c = params.get('c', 1.0)
+            # Mean of Weibull is scale * gamma(1 + 1/c)
+            return scale * stats.gamma.gamma(1 + 1/c)
+        elif dist_name == 'gamma':
+            a = params.get('a', 1.99)
+            # Mean of Gamma is a * scale
+            return a * scale
+        elif dist_name == 'fisk':
+            c = params.get('c', 1.0)
+            # Mean of Fisk is scale * gamma(1 + 1/c) * gamma(1 - 1/c) / gamma(1)
+            # This is complex, and for c <= 1, mean is undefined.
+            # For simplicity, using a common approximation or assuming a well-behaved 'c'
+            if c > 1:
+                return scale * (np.pi/c) / np.sin(np.pi/c) # Simplified for certain cases, needs review
+            return np.nan # Undefined for c <= 1
+        elif dist_name == 'rayleigh':
+            # Mean of Rayleigh is scale * sqrt(pi/2)
+            return scale * np.sqrt(np.pi / 2)
+        elif dist_name in ['foldcauchy', 'foldnorm']:
+            # These are folded distributions, mean is more complex.
+            # For simplicity, we might approximate or return loc if it's the center of the unfolded dist
+            return loc # This is a simplification, careful with interpretation
+        elif dist_name == 'ncx2':
+            df = params.get('df', 1)
+            nc = params.get('nc', 1)
+            return df + nc # Mean of non-central chi-squared
+        else:
+            # For unknown or default, assume normal-like and return loc
+            return loc
+
 
     @st.cache_data
     def plot_comparison_distribution(_self, original_dist_name, original_params_tuple,
@@ -337,9 +418,20 @@ class TunnelSimulator:
         for _, front in fronts_df.iterrows():
             p1, p2 = np.array([front['Xi'], front['Yi']]), np.array([front['Xf'], front['Yf']])
             line_vec, line_len_sq = p2 - p1, np.dot(p2 - p1, p2 - p1)
+            dist_to_line_segment = lambda p, a, b: np.linalg.norm(np.cross(b - a, a - p)) / np.linalg.norm(b - a) if np.linalg.norm(b - a) != 0 else np.linalg.norm(p - a) # Corrected for point-to-segment distance
+
             for r in all_restrictions:
                 c = np.array([r['X'], r['Y']])
-                dist_sq = np.sum((p1 - c)**2) if line_len_sq == 0 else np.sum((p1 + max(0, min(1, np.dot(c - p1, line_vec) / line_len_sq)) * line_vec - c)**2)
+                # Project c onto the line defined by p1 and p2
+                t = 0.0
+                if line_len_sq > 1e-9: # Avoid division by zero for point fronts
+                    t = np.dot(c - p1, line_vec) / line_len_sq
+                
+                # Clamp t to [0, 1] to get the closest point on the segment
+                closest_point_on_segment = p1 + max(0, min(1, t)) * line_vec
+                
+                dist_sq = np.sum((closest_point_on_segment - c)**2) # Distance from restriction center to closest point on segment
+
                 if dist_sq < radius**2:
                     front_name = front['Frentes']
                     colliding_fronts.setdefault(front_name, []).append(r.get('Nombre', 'Sin Nombre'))
@@ -584,19 +676,26 @@ def main():
     if 'manual_delays' not in st.session_state: st.session_state.manual_delays = []
     if 'recursos_file_name' not in st.session_state: st.session_state.recursos_file_name = None
     if 'restricciones_file_name' not in st.session_state: st.session_state.restricciones_file_name = None
+    if 'tiempo_planificado' not in st.session_state: st.session_state.tiempo_planificado = 160.0
+
 
     with st.sidebar:
         st.header("⚙️ Configuración Global")
         st.subheader("Parámetros de Simulación")
         advance_length = st.number_input("Largo de avance por ciclo (m)", 0.1, 10.0, 2.5, 0.1)
         num_simulations = st.number_input("Número de simulaciones de avance", 100, 10000, 1000, 100)
-        time_limit = st.number_input("Tiempo límite total (horas)", 1.0, 8760.0, 160.0, 1.0) 
+        
+        # CAMBIO 2: Renombrar "Tiempo límite total (horas)"
+        st.session_state.tiempo_planificado = st.number_input("Tiempo Límite de Ejecución de Obras por Simulación (horas)", 1.0, 8760.0, 160.0, 1.0) 
+        time_limit = st.session_state.tiempo_planificado # Assign to variable used in simulation
+
         restriction_radius = st.number_input("Radio de restricciones (m)", 10.0, 200.0, 50.0, 10.0)
         restriction_delay_time = st.number_input("Demora por restricción (horas)", 0.0, 24.0, 4.0, 0.5)
         time_modification_percent = st.number_input("Modificación de tiempo global (%)", -50, 100, 0, 5, help="Afecta a TODAS las actividades.")
 
         st.markdown("---")
-        st.subheader("🔧 Sensibilización de Recursos")
+        # CAMBIO 3: Renombrar "Sensibilización de Recursos"
+        st.subheader("🔧 Sensibilización de Recursos - Variación de Atraso o Adelantamiento del Tiempo")
         if st.session_state.simulator.activities_df is not None:
             levels = st.session_state.simulator.activities_df['Nivel'].dropna().unique()
             level_to_config = st.selectbox("Nivel para ajustar recursos", options=levels, key="level_adj_res")
@@ -683,25 +782,29 @@ def main():
 
             if nivel_masivo_selected:
                 activities_in_level = st.session_state.simulator.activities_df[st.session_state.simulator.activities_df['Nivel'] == nivel_masivo_selected]
-                activities_to_modify_uids = st.multiselect(
-                    "Seleccionar Actividades a Modificar (o dejar vacío para todas)",
-                    options=activities_in_level.apply(lambda x: f"{x['Actividad']} ({x['Recurso']})", axis=1).unique(),
-                    key="activities_masive_sel"
-                )
                 
-                # Filter to get actual UIDs
-                if activities_to_modify_uids:
-                    filtered_uids = []
-                    for act_str in activities_to_modify_uids:
-                        # Extract Activity and Resource from string "Activity (Resource)"
-                        act_name = act_str.split(' (')[0]
-                        res_name = act_str.split(' (')[1][:-1]
-                        # Find the corresponding unique_id
-                        matching_rows = activities_in_level[(activities_in_level['Actividad'] == act_name) & (activities_in_level['Recurso'] == res_name)]
-                        if not matching_rows.empty:
-                            filtered_uids.extend(matching_rows['unique_id'].tolist())
+                # CAMBIO 1: Añadir "Seleccionar Todo"
+                all_activities_options = activities_in_level.apply(lambda x: f"{x['Actividad']} ({x['Recurso']})", axis=1).tolist()
+                
+                select_all_activities = st.checkbox("Seleccionar todas las actividades en este nivel", key="select_all_activities_mass")
+
+                if select_all_activities:
+                    activities_to_modify_uids_display = all_activities_options
                 else:
-                    filtered_uids = activities_in_level['unique_id'].tolist()
+                    activities_to_modify_uids_display = st.multiselect(
+                        "Seleccionar Actividades a Modificar",
+                        options=all_activities_options,
+                        default=[], # Clear default when select_all is unchecked
+                        key="activities_masive_sel"
+                    )
+
+                filtered_uids = []
+                for act_str in activities_to_modify_uids_display:
+                    act_name = act_str.split(' (')[0]
+                    res_name = act_str.split(' (')[1][:-1]
+                    matching_rows = activities_in_level[(activities_in_level['Actividad'] == act_name) & (activities_in_level['Recurso'] == res_name)]
+                    if not matching_rows.empty:
+                        filtered_uids.extend(matching_rows['unique_id'].tolist())
 
 
                 st.markdown("#### Configurar Nueva Distribución (Aplicará a las seleccionadas)")
@@ -760,7 +863,7 @@ def main():
                         for uid in activities_in_level['unique_id'].tolist():
                             if uid in st.session_state.modified_times:
                                 del st.session_state.modified_times[uid]
-                                count_reset += 1
+                                count_reset += 0
                         st.info(f"Restablecidas {count_reset} actividades del nivel {nivel_masivo_selected} a su configuración original.")
                         st.rerun()
 
@@ -818,7 +921,7 @@ def main():
                         shape_label = {'lognorm': 'Sigma', 'weibull': 'k', 'gamma': 'alpha', 'fisk': 'c'}[new_dist]
                         shape_defaults = {'s': 0.5, 'c': 2.0, 'a': 2.0}
                         # If already modified and has the shape param, use its value, else use default
-                        default_shape_val = shape_defaults.get(shape_key, 1.0)
+                        default_shape_val = default_shape_val = shape_defaults.get(shape_key, 1.0)
                         if uid in st.session_state.modified_times and shape_key in st.session_state.modified_times[uid]['params']:
                             default_shape_val = st.session_state.modified_times[uid]['params'][shape_key]
                         new_params[shape_key] = st.number_input(f"Parámetro de Forma ({shape_label})", 0.1, 20.0, default_shape_val, 0.1, key=f"p1_{uid}")
@@ -869,7 +972,7 @@ def main():
 
                     with st.spinner("Generando análisis detallado y Carta Gantt..."):
                         selected_level_for_analysis = nivel_sel # Use the selected level for simulation
-                        num_samples_analysis = 1000
+                        num_samples_analysis = num_simulations # Use num_simulations for consistency
 
                         st.session_state.activity_dist_df = st.session_state.simulator.simulate_activity_distributions(
                             nivel=selected_level_for_analysis, num_samples=num_samples_analysis,
@@ -897,8 +1000,12 @@ def main():
         st.header("📊 Resultados de la Simulación de Avance")
         results_df = st.session_state.all_results_df
 
+        # Calculate additional metrics for the summary table
         summary = results_df.groupby(['Nivel', 'Frentes']).agg(
-            Distancia_Promedio_m=('actual_distance', 'mean'),
+            Avance_Promedio_m=('actual_distance', 'mean'), # CAMBIO 4: Renombrar
+            Avance_P10_m=('actual_distance', lambda x: x.quantile(0.1)), # CAMBIO 4: Añadir P10
+            Avance_P50_m=('actual_distance', lambda x: x.quantile(0.5)), # CAMBIO 4: Añadir P50
+            Avance_P90_m=('actual_distance', lambda x: x.quantile(0.9)), # CAMBIO 4: Añadir P90
             Eficiencia_Media_pct=('efficiency', lambda x: x.mean() * 100),
             Ciclos_Completados_Promedio=('completed_cycles', 'mean'),
             Tiempo_Ciclo_Promedio_hrs=('avg_cycle_time', 'mean'),
@@ -906,13 +1013,17 @@ def main():
         ).reset_index()
 
         summary = pd.merge(st.session_state.simulator.fronts_df, summary, on=['Nivel', 'Frentes'], how='right')
-        summary['Largo_Planeado_m'] = np.sqrt((summary['Xf'] - summary['Xi'])**2 + (summary['Yf'] - summary['Yi'])**2)
-        
+        # CAMBIO 4: Renombrar 'Largo_Planeado_m'
+        summary['Avance_Planeado_m'] = np.sqrt((summary['Xf'] - summary['Xi'])**2 + (summary['Yf'] - summary['Yi'])**2)
+        summary['Tiempo_Planificado_hrs'] = st.session_state.tiempo_planificado # CAMBIO 4: Añadir Tiempo Planificado
+
         st.info("Esta tabla muestra la conexión directa entre demoras, tiempo de ciclo, ciclos completados y el avance final.")
         
         st.dataframe(summary[[
-            'Nivel', 'Frentes', 'Largo_Planeado_m', 'Distancia_Promedio_m',
-            'Eficiencia_Media_pct', 'Ciclos_Completados_Promedio', 'Tiempo_Ciclo_Promedio_hrs'
+            'Nivel', 'Frentes', 'Avance_Planeado_m', 'Avance_Promedio_m',
+            'Avance_P10_m', 'Avance_P50_m', 'Avance_P90_m', # CAMBIO 4: Mostrar nuevos percentiles
+            'Eficiencia_Media_pct', 'Ciclos_Completados_Promedio', 'Tiempo_Ciclo_Promedio_hrs',
+            'Tiempo_Planificado_hrs' # CAMBIO 4: Mostrar Tiempo Planificado
         ]].round(2), use_container_width=True)
 
 
@@ -934,12 +1045,14 @@ def main():
         st.header("🔬 Análisis Detallado de Actividades del Ciclo")
 
         st.subheader("Análisis de Tiempos (Optimista-Pesimista-Probable)")
-        st.info("Calculado sobre 1000 ciclos simulados con los parámetros actuales. Optimista=P10, Probable=P50 (Mediana), Pesimista=P90.")
+        st.info(f"Calculado sobre {num_simulations} ciclos simulados con los parámetros actuales. Optimista=P10, Probable=P50 (Mediana), Pesimista=P90.")
 
+        # CAMBIO 4: Añadir Esperanza
         summary_act = st.session_state.activity_dist_df.groupby(['Actividad', 'Recurso'])['Duracion'].agg(
             Optimista_P10=lambda x: x.quantile(0.1),
             Mas_Probable_P50=lambda x: x.quantile(0.5),
-            Pesimista_P90=lambda x: x.quantile(0.9)
+            Pesimista_P90=lambda x: x.quantile(0.9),
+            Esperanza_Media='mean'
         ).reset_index()
         st.dataframe(summary_act.round(2), use_container_width=True)
 
